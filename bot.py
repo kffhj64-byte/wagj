@@ -14,9 +14,9 @@ import google.generativeai as genai
 
 # --- الإعدادات الأساسية ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
-MY_TELEGRAM_ID = int(os.environ.get('MY_TELEGRAM_ID', 8435344041)) # معرفك الخاص
+MY_TELEGRAM_ID = int(os.environ.get('MY_TELEGRAM_ID', 8435344041))
 PORT = int(os.environ.get('PORT', 3000))
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '') # مفتاح الذكاء الاصطناعي (اختياري)
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher()
@@ -190,26 +190,20 @@ async def run_playwright_task(data, message_obj):
         await stealth_async(page)
 
         try:
-            # 1. الدخول للصفحة الرئيسية أولاً لجمع ملفات تعريف الارتباط (Cookies) وتخطي الشاشة البيضاء
             await page.goto('https://www.whatsapp.com/?lang=en', wait_until='domcontentloaded', timeout=40000)
             await asyncio.sleep(random.randint(2, 4))
             
-            # 2. الانتقال لصفحة الدعم الفني
             await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='domcontentloaded', timeout=40000)
             await asyncio.sleep(3)
 
-            # 3. التحقق الذكي (Auto-Heal): إذا كانت الصفحة بيضاء، نقوم بعمل Refresh
             content = await page.content()
             if "phone_number" not in content:
-                print("⚠️ صفحة بيضاء مكتشفة، جاري التحديث الذكي...")
                 await page.reload(wait_until='domcontentloaded', timeout=40000)
                 await asyncio.sleep(4)
 
-            # استهداف الحقول وإدخال البيانات ببطء بشري
             phone_input = page.locator('input[name="phone_number"], input[type="tel"]').first
             await phone_input.wait_for(state='visible', timeout=25000)
 
-            # تعديل رمز الدولة
             js_code = f"""
             (cCode) => {{
                 const cleanCode = cCode.replace('+', '');
@@ -256,7 +250,8 @@ async def run_playwright_task(data, message_obj):
             success_screenshot = f"success_{random.randint(1000,9999)}.png"
             await page.screenshot(path=success_screenshot, full_page=True)
             await message_obj.answer_photo(FSInputFile(success_screenshot), caption=f"✅ <b>تم الإرسال بنجاح!</b>\n📱 الرقم: <code>{country_code}{local_phone}</code>")
-            os.remove(success_screenshot)
+            if os.path.exists(success_screenshot):
+                os.remove(success_screenshot)
 
         except Exception as e:
             print(f"Error: {e}")
@@ -264,10 +259,12 @@ async def run_playwright_task(data, message_obj):
             try:
                 await page.screenshot(path=screenshot_path, full_page=True)
                 await message_obj.answer_photo(FSInputFile(screenshot_path), caption=f"❌ فشل الإرسال (حماية النظام).\nالخطأ: <code>{str(e)[:100]}</code>")
-                os.remove(screenshot_path)
+                if os.path.exists(screenshot_path):
+                    os.remove(screenshot_path)
             except:
                 pass
         finally:
+            await context.close()
             await browser.close()
 
 # --- خادم الويب الخاص بـ Render ---
