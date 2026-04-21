@@ -172,22 +172,29 @@ async def run_playwright_task(data, message_obj):
             headless=True,
             args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
         )
+        
+        # إجبار المتصفح على استخدام اللغة الإنجليزية وضبط حجم نافذة مناسب للقطات الشاشة
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="en-US",
+            viewport={'width': 1280, 'height': 900}
         )
         page = await context.new_page()
         await stealth_async(page) # تفعيل التخفي
 
-        # حظر الصور والخطوط لتسريع العمل على Render
+        # تم إزالة stylesheet من هنا لكي لا يتشوه التصميم وتختفي العناصر وتسبب Timeout
         async def intercept(route):
-            if route.request.resource_type in ["image", "stylesheet", "font", "media"]:
+            if route.request.resource_type in ["image", "font", "media"]:
                 await route.abort()
             else:
                 await route.continue_()
         await page.route("**/*", intercept)
 
         try:
-            await page.goto('https://www.whatsapp.com/contact/noclient/', wait_until='domcontentloaded', timeout=60000)
+            # إضافة ?lang=en في الرابط لإجبار واتساب على فتح الصفحة بالإنجليزية
+            await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='networkidle', timeout=60000)
+            
+            # انتظار ظهور الحقل
             await page.wait_for_selector('input[name="phone_number"]', timeout=30000)
 
             # تغيير رمز الدولة برمجياً
@@ -222,26 +229,35 @@ async def run_playwright_task(data, message_obj):
             
             await page.type('#message, textarea[name="message"]', custom_msg, delay=random.randint(20, 50))
             
-            # الإرسال
-            await page.click('button[type="submit"]')
-            await asyncio.sleep(5)
+            # الإرسال (البحث عن الزر بناءً على الكلمات الإنجليزية لضمان الدقة)
+            submit_button = page.locator('button[type="submit"], button:has-text("Next Step")').first
+            await submit_button.click()
+            await asyncio.sleep(4)
             
-            if await page.locator('button[type="submit"]').count() > 0:
-                await page.click('button[type="submit"]')
-                await asyncio.sleep(3)
+            # التأكد من عدم وجود خطوة تأكيد ثانية (Send Question)
+            final_send_button = page.locator('button:has-text("Send Question")').first
+            if await final_send_button.count() > 0 and await final_send_button.is_visible():
+                await final_send_button.click()
+                await asyncio.sleep(4)
 
-            await message_obj.answer(f"✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم المستهدف: <code>{full_phone}</code>")
+            # التقاط شاشة كاملة للنجاح
+            success_screenshot = f"success_{random.randint(1000,9999)}.png"
+            await page.screenshot(path=success_screenshot, full_page=True)
+            photo = FSInputFile(success_screenshot)
+            await message_obj.answer_photo(photo, caption=f"✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم المستهدف: <code>{full_phone}</code>")
+            os.remove(success_screenshot)
 
         except Exception as e:
             print(f"Error: {e}")
             screenshot_path = f"error_{random.randint(1000,9999)}.png"
             try:
-                await page.screenshot(path=screenshot_path)
+                # التقاط شاشة كاملة عند الفشل (full_page=True)
+                await page.screenshot(path=screenshot_path, full_page=True)
                 photo = FSInputFile(screenshot_path)
-                await message_obj.answer_photo(photo, caption=f"❌ فشل الإرسال.\nالخطأ التقني: {str(e)[:100]}")
+                await message_obj.answer_photo(photo, caption=f"❌ فشل الإرسال.\nالخطأ التقني: <code>{str(e)[:150]}</code>")
                 os.remove(screenshot_path)
-            except:
-                await message_obj.answer(f"❌ فشل الإرسال.\nالخطأ: {str(e)}")
+            except Exception as pic_error:
+                await message_obj.answer(f"❌ فشل الإرسال ولم أتمكن من التقاط صورة.\nالخطأ: {str(e)[:100]}")
         finally:
             await browser.close()
 
