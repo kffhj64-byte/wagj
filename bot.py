@@ -10,16 +10,23 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
+import google.generativeai as genai
 
 # --- الإعدادات الأساسية ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
-MY_TELEGRAM_ID = int(os.environ.get('MY_TELEGRAM_ID', 8435344041))
+MY_TELEGRAM_ID = int(os.environ.get('MY_TELEGRAM_ID', 8435344041)) # معرفك الخاص
 PORT = int(os.environ.get('PORT', 3000))
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '') # مفتاح الذكاء الاصطناعي (اختياري)
 
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
-# --- إدارة حالات المحادثة (FSM) ---
+# إعداد الذكاء الاصطناعي
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    ai_model = genai.GenerativeModel('gemini-pro')
+
+# --- إدارة حالات المحادثة ---
 class FormSteps(StatesGroup):
     get_manual_code = State()
     get_phone = State()
@@ -27,7 +34,7 @@ class FormSteps(StatesGroup):
     get_message = State()
     confirm = State()
 
-# --- الواجهات والأزرار ---
+# --- الواجهات ---
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text='🚀 إرسال طلب دعم جديد'), KeyboardButton(text='📊 حالة السيرفر')],
@@ -36,15 +43,13 @@ main_menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-country_menu = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton(text='🇾🇪 اليمن (+967)', callback_data='set_code_+967'), InlineKeyboardButton(text='🇸🇦 السعودية (+966)', callback_data='set_code_+966')],
-        [InlineKeyboardButton(text='🇪🇬 مصر (+20)', callback_data='set_code_+20'), InlineKeyboardButton(text='🌐 رمز آخر (يدوي)', callback_data='set_code_manual')],
-        [InlineKeyboardButton(text='🚫 إلغاء', callback_data='cancel_task')]
-    ]
-)
+country_menu = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text='🇾🇪 اليمن (+967)', callback_data='set_code_+967'), InlineKeyboardButton(text='🇸🇦 السعودية (+966)', callback_data='set_code_+966')],
+    [InlineKeyboardButton(text='🇪🇬 مصر (+20)', callback_data='set_code_+20'), InlineKeyboardButton(text='🌐 رمز آخر (يدوي)', callback_data='set_code_manual')],
+    [InlineKeyboardButton(text='🚫 إلغاء', callback_data='cancel_task')]
+])
 
-# --- فلتر حماية: السماح للمدير فقط ---
+# --- فلتر حماية ---
 @dp.message.outer_middleware()
 async def auth_middleware(handler, event, data):
     if event.from_user.id != MY_TELEGRAM_ID:
@@ -57,30 +62,27 @@ async def auth_callback_middleware(handler, event, data):
         return
     return await handler(event, data)
 
-# --- أوامر البوت الأساسية ---
+# --- الأوامر ---
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n\n<i>النظام مبني على Python وجاهز للعمل على Render.</i>",
-        reply_markup=main_menu
-    )
+    await message.answer("<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n<i>النظام مدعوم بالذكاء الاصطناعي وجاهز للعمل.</i>", reply_markup=main_menu)
 
 @dp.message(F.text == '📊 حالة السيرفر')
 async def server_status(message: Message):
-    await message.answer("<b>📊 حالة النظام:</b>\nالمتصفح: مستعد للعمل 🟢\nالخادم (Render): متصل 🟢")
+    ai_status = "متصل 🟢" if GEMINI_API_KEY else "غير مفعل 🔴 (أضف GEMINI_API_KEY)"
+    await message.answer(f"<b>📊 حالة النظام:</b>\nالمتصفح: مستعد للعمل 🟢\nالذكاء الاصطناعي: {ai_status}\nالخادم: متصل 🟢")
 
 @dp.message(F.text == '❌ إلغاء العملية')
 async def cancel_process(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("✅ تم تنظيف الجلسة والعودة للقائمة الرئيسية.", reply_markup=main_menu)
+    await message.answer("✅ تم الإلغاء.", reply_markup=main_menu)
 
 @dp.message(F.text == '🚀 إرسال طلب دعم جديد')
 async def new_request(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("<b>🌍 الخطوة 1:</b> اختر الدولة المستهدفة:", reply_markup=country_menu)
 
-# --- استقبال رمز الدولة ---
 @dp.callback_query(F.data.startswith('set_code_'))
 async def process_country(callback: CallbackQuery, state: FSMContext):
     code = callback.data.replace('set_code_', '')
@@ -96,22 +98,19 @@ async def process_country(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == 'cancel_task')
 async def cancel_inline(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("❌ تم إلغاء العملية بنجاح.")
+    await callback.message.edit_text("❌ تم الإلغاء.")
     await callback.answer()
 
-# --- استقبال البيانات النصية ---
 @dp.message(FormSteps.get_manual_code)
 async def process_manual_code(message: Message, state: FSMContext):
-    code = message.text.strip()
-    code = code if code.startswith('+') else f"+{code}"
+    code = f"+{message.text.strip().replace('+', '')}"
     await state.update_data(country_code=code)
     await state.set_state(FormSteps.get_phone)
-    await message.answer(f"✅ تم استلام الرمز ({code})\n\n<b>الآن أرسل رقم الهاتف المحلي فقط:</b>")
+    await message.answer(f"✅ تم استلام الرمز ({code})\n\n<b>أرسل رقم الهاتف المحلي فقط:</b>")
 
 @dp.message(FormSteps.get_phone)
 async def process_phone(message: Message, state: FSMContext):
-    local_phone = message.text.strip().replace('+', '')
-    await state.update_data(local_phone=local_phone)
+    await state.update_data(local_phone=message.text.strip().replace('+', ''))
     await state.set_state(FormSteps.get_email)
     await message.answer("<b>📧 الخطوة 2:</b> أرسل البريد الإلكتروني:")
 
@@ -122,22 +121,33 @@ async def process_email(message: Message, state: FSMContext):
         return await message.answer("⚠️ إيميل غير صحيح، حاول مجدداً:")
     await state.update_data(email=email)
     await state.set_state(FormSteps.get_message)
-    await message.answer("<b>📝 الخطوة 3:</b> أرسل نص الرسالة لواتساب:")
+    await message.answer("<b>📝 الخطوة 3:</b> اشرح المشكلة باختصار (وسيقوم الذكاء الاصطناعي بصياغتها):")
 
 @dp.message(FormSteps.get_message)
 async def process_message(message: Message, state: FSMContext):
+    raw_msg = message.text.strip()
+    processing_msg = await message.answer("⏳ جاري صياغة الرسالة باستخدام الذكاء الاصطناعي...")
+    
+    final_msg = raw_msg
+    if GEMINI_API_KEY:
+        try:
+            prompt = f"ترجم هذه المشكلة إلى الإنجليزية الرسمية واجعلها تبدو كرسالة احترافية لدعم فني واتساب لفك حظر الرقم أو حل المشكلة، بدون أي إضافات أو مقدمات منك، فقط نص الرسالة الجاهز للإرسال: '{raw_msg}'"
+            response = ai_model.generate_content(prompt)
+            final_msg = response.text.strip()
+        except Exception as e:
+            print("AI Error:", e)
+    
+    await processing_msg.delete()
+    await state.update_data(custom_message=final_msg)
     data = await state.get_data()
-    custom_msg = message.text.strip()
-    await state.update_data(custom_message=custom_msg)
     
     summary = (
-        f"<b>👑 مراجعة الطلب النهائي (VIP - Python)</b>\n\n"
-        f"🌍 <b>رمز الدولة:</b> <code>{data.get('country_code')}</code>\n"
-        f"📱 <b>الرقم المحلي:</b> <code>{data.get('local_phone')}</code>\n"
+        f"<b>👑 مراجعة الطلب (الذكاء الاصطناعي 🧠)</b>\n\n"
+        f"📱 <b>الرقم:</b> <code>{data.get('country_code')}{data.get('local_phone')}</code>\n"
         f"📧 <b>الإيميل:</b> <code>{data.get('email')}</code>\n\n"
-        f"<b>هل تريد التنفيذ الآن؟</b>"
+        f"📄 <b>الرسالة النهائية:</b>\n<i>{final_msg}</i>\n\n"
+        f"<b>هل تريد التنفيذ؟</b>"
     )
-    
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🚀 نعم، أرسل الآن', callback_data='start_task')],
         [InlineKeyboardButton(text='❌ إلغاء', callback_data='cancel_task')]
@@ -145,56 +155,61 @@ async def process_message(message: Message, state: FSMContext):
     await message.answer(summary, reply_markup=markup)
     await state.set_state(FormSteps.confirm)
 
-# --- بدء عملية المحرك ---
 @dp.callback_query(F.data == 'start_task')
 async def start_task(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data:
-        return await callback.answer("⚠️ الجلسة منتهية، ابدأ من جديد.", show_alert=True)
-    
-    await callback.message.edit_text("🔄 <b>جاري تشغيل محرك بايثون وإرسال الطلب... الرجاء الانتظار قليلاً⏳</b>")
-    
+    await callback.message.edit_text("🔄 <b>جاري تشغيل محرك بايثون لتخطي الحماية وإرسال الطلب... ⏳</b>")
     asyncio.create_task(run_playwright_task(data, callback.message))
     await state.clear()
     await callback.answer()
 
-# --- محرك Playwright المتطور ---
+# --- محرك Playwright المعزز ---
 async def run_playwright_task(data, message_obj):
     country_code = data['country_code']
     local_phone = data['local_phone']
     email = data['email']
     custom_msg = data['custom_message']
-    full_phone = f"{country_code}{local_phone}"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage', 
-                '--disable-gpu',
-                '--disable-blink-features=AutomationControlled'
+                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled', '--disable-infobars',
+                '--window-size=1280,900'
             ]
         )
         
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             locale="en-US",
-            viewport={'width': 1280, 'height': 900}
+            viewport={'width': 1280, 'height': 900},
+            java_script_enabled=True
         )
         page = await context.new_page()
         await stealth_async(page)
 
         try:
-            # استخدام load بدلاً من networkidle لتفادي الـ Timeout
-            await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='load', timeout=60000)
+            # 1. الدخول للصفحة الرئيسية أولاً لجمع ملفات تعريف الارتباط (Cookies) وتخطي الشاشة البيضاء
+            await page.goto('https://www.whatsapp.com/?lang=en', wait_until='domcontentloaded', timeout=40000)
+            await asyncio.sleep(random.randint(2, 4))
             
-            # انتظار ظهور حقل الهاتف بشكل صريح وبمحدد أكثر مرونة
-            phone_input = page.locator('input[name="phone_number"], input[type="tel"]').first
-            await phone_input.wait_for(state='visible', timeout=30000)
+            # 2. الانتقال لصفحة الدعم الفني
+            await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='domcontentloaded', timeout=40000)
+            await asyncio.sleep(3)
 
-            # تغيير رمز الدولة
+            # 3. التحقق الذكي (Auto-Heal): إذا كانت الصفحة بيضاء، نقوم بعمل Refresh
+            content = await page.content()
+            if "phone_number" not in content:
+                print("⚠️ صفحة بيضاء مكتشفة، جاري التحديث الذكي...")
+                await page.reload(wait_until='domcontentloaded', timeout=40000)
+                await asyncio.sleep(4)
+
+            # استهداف الحقول وإدخال البيانات ببطء بشري
+            phone_input = page.locator('input[name="phone_number"], input[type="tel"]').first
+            await phone_input.wait_for(state='visible', timeout=25000)
+
+            # تعديل رمز الدولة
             js_code = f"""
             (cCode) => {{
                 const cleanCode = cCode.replace('+', '');
@@ -204,8 +219,7 @@ async def run_playwright_task(data, message_obj):
                     for (let option of countrySelect.options) {{
                         if (option.value.includes(cleanCode) || option.text.includes(cCode)) {{
                             countrySelect.value = option.value;
-                            countrySelect.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            break;
+                            countrySelect.dispatchEvent(new Event('change', {{ bubbles: true }})); break;
                         }}
                     }}
                 }}
@@ -214,41 +228,34 @@ async def run_playwright_task(data, message_obj):
             await page.evaluate(js_code, country_code)
             await asyncio.sleep(1)
 
-            # إدخال البيانات
             await phone_input.fill("")
-            await phone_input.type(local_phone, delay=random.randint(40, 90))
+            await phone_input.type(local_phone, delay=random.randint(50, 100))
             
             email_input = page.locator('input[name="email"], input[type="email"]').first
-            await email_input.type(email, delay=random.randint(40, 90))
+            await email_input.type(email, delay=random.randint(40, 80))
             
             email_confirm = page.locator('input[name="email_confirm"]')
             if await email_confirm.count() > 0:
-                await email_confirm.type(email, delay=random.randint(40, 90))
+                await email_confirm.type(email, delay=random.randint(40, 80))
 
-            # اختيار نوع الجهاز
             await page.evaluate('() => { const r = document.querySelector(\'input[type="radio"][value="android"]\') || document.querySelector(\'input[type="radio"]\'); if(r) r.click(); }')
             
-            # إدخال الرسالة
             msg_box = page.locator('#message, textarea[name="message"]').first
-            await msg_box.type(custom_msg, delay=random.randint(20, 50))
+            await msg_box.type(custom_msg, delay=random.randint(10, 30))
             
-            # الإرسال
             submit_button = page.locator('button[type="submit"], button:has-text("Next Step")').first
             await submit_button.scroll_into_view_if_needed()
             await submit_button.click()
-            await asyncio.sleep(4)
+            await asyncio.sleep(3)
             
-            # خطوة التأكيد النهائية (إن وجدت)
             final_send_button = page.locator('button:has-text("Send Question")').first
             if await final_send_button.count() > 0 and await final_send_button.is_visible():
                 await final_send_button.click()
                 await asyncio.sleep(4)
 
-            # التقاط شاشة كاملة للنجاح
             success_screenshot = f"success_{random.randint(1000,9999)}.png"
             await page.screenshot(path=success_screenshot, full_page=True)
-            photo = FSInputFile(success_screenshot)
-            await message_obj.answer_photo(photo, caption=f"✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم المستهدف: <code>{full_phone}</code>")
+            await message_obj.answer_photo(FSInputFile(success_screenshot), caption=f"✅ <b>تم الإرسال بنجاح!</b>\n📱 الرقم: <code>{country_code}{local_phone}</code>")
             os.remove(success_screenshot)
 
         except Exception as e:
@@ -256,31 +263,24 @@ async def run_playwright_task(data, message_obj):
             screenshot_path = f"error_{random.randint(1000,9999)}.png"
             try:
                 await page.screenshot(path=screenshot_path, full_page=True)
-                photo = FSInputFile(screenshot_path)
-                await message_obj.answer_photo(photo, caption=f"❌ فشل الإرسال.\nالخطأ التقني: <code>{str(e)[:150]}</code>")
+                await message_obj.answer_photo(FSInputFile(screenshot_path), caption=f"❌ فشل الإرسال (حماية النظام).\nالخطأ: <code>{str(e)[:100]}</code>")
                 os.remove(screenshot_path)
-            except Exception as pic_error:
-                await message_obj.answer(f"❌ فشل الإرسال ولم أتمكن من التقاط صورة.\nالخطأ: {str(e)[:100]}")
+            except:
+                pass
         finally:
             await browser.close()
 
 # --- خادم الويب الخاص بـ Render ---
-async def web_handler(request):
-    return web.Response(text="🟢 الخادم يعمل والبوت متصل!")
-
+async def web_handler(request): return web.Response(text="🟢 Bot is running!")
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', web_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    print(f"🌐 خادم الويب يعمل على المنفذ {PORT}")
+    await web.TCPSite(runner, '0.0.0.0', PORT).start()
 
-# --- نقطة البداية ---
 async def main():
     await start_web_server()
-    print("🤖 جاري تشغيل بوت التليجرام...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
