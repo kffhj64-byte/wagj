@@ -154,7 +154,6 @@ async def start_task(callback: CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text("🔄 <b>جاري تشغيل محرك بايثون وإرسال الطلب... الرجاء الانتظار قليلاً⏳</b>")
     
-    # تشغيل المتصفح في الخلفية حتى لا يتوقف البوت
     asyncio.create_task(run_playwright_task(data, callback.message))
     await state.clear()
     await callback.answer()
@@ -170,34 +169,32 @@ async def run_playwright_task(data, message_obj):
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+            args=[
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage', 
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled'
+            ]
         )
         
-        # إجبار المتصفح على استخدام اللغة الإنجليزية وضبط حجم نافذة مناسب للقطات الشاشة
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             locale="en-US",
             viewport={'width': 1280, 'height': 900}
         )
         page = await context.new_page()
-        await stealth_async(page) # تفعيل التخفي
-
-        # تم إزالة stylesheet من هنا لكي لا يتشوه التصميم وتختفي العناصر وتسبب Timeout
-        async def intercept(route):
-            if route.request.resource_type in ["image", "font", "media"]:
-                await route.abort()
-            else:
-                await route.continue_()
-        await page.route("**/*", intercept)
+        await stealth_async(page)
 
         try:
-            # إضافة ?lang=en في الرابط لإجبار واتساب على فتح الصفحة بالإنجليزية
-            await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='networkidle', timeout=60000)
+            # استخدام load بدلاً من networkidle لتفادي الـ Timeout
+            await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='load', timeout=60000)
             
-            # انتظار ظهور الحقل
-            await page.wait_for_selector('input[name="phone_number"]', timeout=30000)
+            # انتظار ظهور حقل الهاتف بشكل صريح وبمحدد أكثر مرونة
+            phone_input = page.locator('input[name="phone_number"], input[type="tel"]').first
+            await phone_input.wait_for(state='visible', timeout=30000)
 
-            # تغيير رمز الدولة برمجياً
+            # تغيير رمز الدولة
             js_code = f"""
             (cCode) => {{
                 const cleanCode = cCode.replace('+', '');
@@ -218,23 +215,30 @@ async def run_playwright_task(data, message_obj):
             await asyncio.sleep(1)
 
             # إدخال البيانات
-            await page.fill('input[name="phone_number"]', "")
-            await page.type('input[name="phone_number"]', local_phone, delay=random.randint(40, 90))
+            await phone_input.fill("")
+            await phone_input.type(local_phone, delay=random.randint(40, 90))
             
-            await page.type('input[name="email"]', email, delay=random.randint(40, 90))
-            if await page.locator('input[name="email_confirm"]').count() > 0:
-                await page.type('input[name="email_confirm"]', email, delay=random.randint(40, 90))
+            email_input = page.locator('input[name="email"], input[type="email"]').first
+            await email_input.type(email, delay=random.randint(40, 90))
+            
+            email_confirm = page.locator('input[name="email_confirm"]')
+            if await email_confirm.count() > 0:
+                await email_confirm.type(email, delay=random.randint(40, 90))
 
+            # اختيار نوع الجهاز
             await page.evaluate('() => { const r = document.querySelector(\'input[type="radio"][value="android"]\') || document.querySelector(\'input[type="radio"]\'); if(r) r.click(); }')
             
-            await page.type('#message, textarea[name="message"]', custom_msg, delay=random.randint(20, 50))
+            # إدخال الرسالة
+            msg_box = page.locator('#message, textarea[name="message"]').first
+            await msg_box.type(custom_msg, delay=random.randint(20, 50))
             
-            # الإرسال (البحث عن الزر بناءً على الكلمات الإنجليزية لضمان الدقة)
+            # الإرسال
             submit_button = page.locator('button[type="submit"], button:has-text("Next Step")').first
+            await submit_button.scroll_into_view_if_needed()
             await submit_button.click()
             await asyncio.sleep(4)
             
-            # التأكد من عدم وجود خطوة تأكيد ثانية (Send Question)
+            # خطوة التأكيد النهائية (إن وجدت)
             final_send_button = page.locator('button:has-text("Send Question")').first
             if await final_send_button.count() > 0 and await final_send_button.is_visible():
                 await final_send_button.click()
@@ -251,7 +255,6 @@ async def run_playwright_task(data, message_obj):
             print(f"Error: {e}")
             screenshot_path = f"error_{random.randint(1000,9999)}.png"
             try:
-                # التقاط شاشة كاملة عند الفشل (full_page=True)
                 await page.screenshot(path=screenshot_path, full_page=True)
                 photo = FSInputFile(screenshot_path)
                 await message_obj.answer_photo(photo, caption=f"❌ فشل الإرسال.\nالخطأ التقني: <code>{str(e)[:150]}</code>")
