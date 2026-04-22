@@ -2,15 +2,28 @@ import asyncio
 import os
 import random
 import re
+import logging
+from functools import lru_cache
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from playwright_stealth import stealth_async
 import google.generativeai as genai
+
+# --- إعدادات التسجيل (Logging) ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot_activity.log", encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # --- الإعدادات الأساسية ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
@@ -25,6 +38,27 @@ dp = Dispatcher()
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     ai_model = genai.GenerativeModel('gemini-pro')
+else:
+    logger.warning("لم يتم العثور على مفتاح GEMINI_API_KEY. سيعمل البوت بدون تحسين النصوص.")
+
+# --- التخزين المؤقت (Caching) لتحسين الأداء ---
+# استخدام ذاكرة التخزين المؤقت لتقليل استهلاك API وتسريع الاستجابة للرسائل المتكررة
+@lru_cache(maxsize=100)
+def get_cached_ai_translation(raw_msg: str) -> str:
+    if not GEMINI_API_KEY:
+        return raw_msg
+    try:
+        prompt = f"ترجم هذه المشكلة إلى الإنجليزية الرسمية واجعلها تبدو كرسالة احترافية لدعم فني واتساب لفك حظر الرقم أو حل المشكلة، بدون أي إضافات أو مقدمات منك، فقط نص الرسالة الجاهز للإرسال: '{raw_msg}'"
+        response = ai_model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"خطأ في الاتصال بـ Gemini API: {e}")
+        return raw_msg
+
+# دالة مساعدة لتشغيل Caching المتزامن في بيئة غير متزامنة
+async def process_text_with_ai(raw_msg: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_cached_ai_translation, raw_msg)
 
 # --- إدارة حالات المحادثة ---
 class FormSteps(StatesGroup):
@@ -53,6 +87,7 @@ country_menu = InlineKeyboardMarkup(inline_keyboard=[
 @dp.message.outer_middleware()
 async def auth_middleware(handler, event, data):
     if event.from_user.id != MY_TELEGRAM_ID:
+        logger.warning(f"محاولة وصول غير مصرح بها من المستخدم: {event.from_user.id}")
         return
     return await handler(event, data)
 
@@ -70,7 +105,7 @@ async def start_cmd(message: Message, state: FSMContext):
 
 @dp.message(F.text == '📊 حالة السيرفر')
 async def server_status(message: Message):
-    ai_status = "متصل 🟢" if GEMINI_API_KEY else "غير مفعل 🔴 (أضف GEMINI_API_KEY)"
+    ai_status = "متصل 🟢" if GEMINI_API_KEY else "غير مفعل 🔴"
     await message.answer(f"<b>📊 حالة النظام:</b>\nالمتصفح: مستعد للعمل 🟢\nالذكاء الاصطناعي: {ai_status}\nالخادم: متصل 🟢")
 
 @dp.message(F.text == '❌ إلغاء العملية')
@@ -103,6 +138,11 @@ async def cancel_inline(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(FormSteps.get_manual_code)
 async def process_manual_code(message: Message, state: FSMContext):
+    # التحقق من صحة رمز الدولة
+    code_match = re.match(r"^\+?\d{1,4}$", message.text.strip())
+    if not code_match:
+        return await message.answer("⚠️ رمز غير صحيح، يرجى إرسال أرقام فقط مع أو بدون (+):")
+    
     code = f"+{message.text.strip().replace('+', '')}"
     await state.update_data(country_code=code)
     await state.set_state(FormSteps.get_phone)
@@ -110,15 +150,20 @@ async def process_manual_code(message: Message, state: FSMContext):
 
 @dp.message(FormSteps.get_phone)
 async def process_phone(message: Message, state: FSMContext):
-    await state.update_data(local_phone=message.text.strip().replace('+', ''))
+    phone = message.text.strip().replace('+', '')
+    if not phone.isdigit():
+         return await message.answer("⚠️ يجب أن يحتوي رقم الهاتف على أرقام فقط. حاول مجدداً:")
+         
+    await state.update_data(local_phone=phone)
     await state.set_state(FormSteps.get_email)
     await message.answer("<b>📧 الخطوة 2:</b> أرسل البريد الإلكتروني:")
 
 @dp.message(FormSteps.get_email)
 async def process_email(message: Message, state: FSMContext):
     email = message.text.strip()
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-        return await message.answer("⚠️ إيميل غير صحيح، حاول مجدداً:")
+    if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", email):
+        return await message.answer("⚠️ إيميل غير صحيح، تأكد من الصيغة وحاول مجدداً:")
+        
     await state.update_data(email=email)
     await state.set_state(FormSteps.get_message)
     await message.answer("<b>📝 الخطوة 3:</b> اشرح المشكلة باختصار (وسيقوم الذكاء الاصطناعي بصياغتها):")
@@ -128,14 +173,7 @@ async def process_message(message: Message, state: FSMContext):
     raw_msg = message.text.strip()
     processing_msg = await message.answer("⏳ جاري صياغة الرسالة باستخدام الذكاء الاصطناعي...")
     
-    final_msg = raw_msg
-    if GEMINI_API_KEY:
-        try:
-            prompt = f"ترجم هذه المشكلة إلى الإنجليزية الرسمية واجعلها تبدو كرسالة احترافية لدعم فني واتساب لفك حظر الرقم أو حل المشكلة، بدون أي إضافات أو مقدمات منك، فقط نص الرسالة الجاهز للإرسال: '{raw_msg}'"
-            response = ai_model.generate_content(prompt)
-            final_msg = response.text.strip()
-        except Exception as e:
-            print("AI Error:", e)
+    final_msg = await process_text_with_ai(raw_msg)
     
     await processing_msg.delete()
     await state.update_data(custom_message=final_msg)
@@ -159,6 +197,7 @@ async def process_message(message: Message, state: FSMContext):
 async def start_task(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await callback.message.edit_text("🔄 <b>جاري تشغيل محرك بايثون لتخطي الحماية وإرسال الطلب... ⏳</b>")
+    # التشغيل غير المتزامن كـ Task منفصل لعدم إيقاف البوت
     asyncio.create_task(run_playwright_task(data, callback.message))
     await state.clear()
     await callback.answer()
@@ -169,6 +208,8 @@ async def run_playwright_task(data, message_obj):
     local_phone = data['local_phone']
     email = data['email']
     custom_msg = data['custom_message']
+
+    logger.info(f"بدء مهمة Playwright للرقم: {country_code}{local_phone}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -181,7 +222,7 @@ async def run_playwright_task(data, message_obj):
         )
         
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             locale="en-US",
             viewport={'width': 1280, 'height': 900},
             java_script_enabled=True
@@ -190,20 +231,25 @@ async def run_playwright_task(data, message_obj):
         await stealth_async(page)
 
         try:
-            await page.goto('https://www.whatsapp.com/?lang=en', wait_until='domcontentloaded', timeout=40000)
-            await asyncio.sleep(random.randint(2, 4))
+            # 1. تجميع ملفات تعريف الارتباط
+            await page.goto('https://www.whatsapp.com/?lang=en', wait_until='networkidle', timeout=40000)
+            await asyncio.sleep(random.uniform(2.0, 4.5))
             
+            # 2. الانتقال لصفحة الدعم الفني
             await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', wait_until='domcontentloaded', timeout=40000)
             await asyncio.sleep(3)
 
-            content = await page.content()
-            if "phone_number" not in content:
-                await page.reload(wait_until='domcontentloaded', timeout=40000)
+            # 3. التحقق الذكي من حقول الإدخال
+            try:
+                phone_input = page.locator('input[name="phone_number"], input[type="tel"]').first
+                await phone_input.wait_for(state='visible', timeout=15000)
+            except PlaywrightTimeoutError:
+                logger.warning("لم يتم العثور على حقل الهاتف، محاولة التحديث الذكي...")
+                await page.reload(wait_until='domcontentloaded')
                 await asyncio.sleep(4)
+                await phone_input.wait_for(state='visible', timeout=15000)
 
-            phone_input = page.locator('input[name="phone_number"], input[type="tel"]').first
-            await phone_input.wait_for(state='visible', timeout=25000)
-
+            # تعديل رمز الدولة برمجياً لتجنب مشاكل القوائم المنسدلة المعقدة
             js_code = f"""
             (cCode) => {{
                 const cleanCode = cCode.replace('+', '');
@@ -222,53 +268,56 @@ async def run_playwright_task(data, message_obj):
             await page.evaluate(js_code, country_code)
             await asyncio.sleep(1)
 
+            # محاكاة الكتابة البشرية (Human Typing Simulation)
             await phone_input.fill("")
-            await phone_input.type(local_phone, delay=random.randint(50, 100))
+            await phone_input.type(local_phone, delay=random.randint(40, 120))
             
             email_input = page.locator('input[name="email"], input[type="email"]').first
-            await email_input.type(email, delay=random.randint(40, 80))
+            await email_input.type(email, delay=random.randint(30, 90))
             
             email_confirm = page.locator('input[name="email_confirm"]')
             if await email_confirm.count() > 0:
-                await email_confirm.type(email, delay=random.randint(40, 80))
+                await email_confirm.type(email, delay=random.randint(30, 90))
 
+            # اختيار نظام التشغيل
             await page.evaluate('() => { const r = document.querySelector(\'input[type="radio"][value="android"]\') || document.querySelector(\'input[type="radio"]\'); if(r) r.click(); }')
             
             msg_box = page.locator('#message, textarea[name="message"]').first
-            await msg_box.type(custom_msg, delay=random.randint(10, 30))
+            await msg_box.type(custom_msg, delay=random.randint(5, 25))
             
+            # الضغط على زر الخطوة التالية
             submit_button = page.locator('button[type="submit"], button:has-text("Next Step")').first
             await submit_button.scroll_into_view_if_needed()
             await submit_button.click()
-            await asyncio.sleep(3)
+            await asyncio.sleep(random.uniform(2.5, 4.0))
             
+            # إرسال الطلب النهائي
             final_send_button = page.locator('button:has-text("Send Question")').first
             if await final_send_button.count() > 0 and await final_send_button.is_visible():
                 await final_send_button.click()
                 await asyncio.sleep(4)
 
+            # التحقق من النجاح والتقاط صورة
             success_screenshot = f"success_{random.randint(1000,9999)}.png"
             await page.screenshot(path=success_screenshot, full_page=True)
             await message_obj.answer_photo(FSInputFile(success_screenshot), caption=f"✅ <b>تم الإرسال بنجاح!</b>\n📱 الرقم: <code>{country_code}{local_phone}</code>")
-            if os.path.exists(success_screenshot):
-                os.remove(success_screenshot)
+            os.remove(success_screenshot)
+            logger.info(f"تم إرسال الطلب بنجاح للرقم: {country_code}{local_phone}")
 
         except Exception as e:
-            print(f"Error: {e}")
+            logger.error(f"فشل في إرسال الطلب عبر Playwright: {e}")
             screenshot_path = f"error_{random.randint(1000,9999)}.png"
             try:
                 await page.screenshot(path=screenshot_path, full_page=True)
-                await message_obj.answer_photo(FSInputFile(screenshot_path), caption=f"❌ فشل الإرسال (حماية النظام).\nالخطأ: <code>{str(e)[:100]}</code>")
-                if os.path.exists(screenshot_path):
-                    os.remove(screenshot_path)
+                await message_obj.answer_photo(FSInputFile(screenshot_path), caption=f"❌ فشل الإرسال (حماية النظام).\nتم تسجيل الخطأ في اللوج الخاص بالخادم.")
+                os.remove(screenshot_path)
             except:
-                pass
+                await message_obj.answer(f"❌ فشل الإرسال وتعذر التقاط صورة للخطأ.")
         finally:
-            await context.close()
             await browser.close()
 
 # --- خادم الويب الخاص بـ Render ---
-async def web_handler(request): return web.Response(text="🟢 Bot is running!")
+async def web_handler(request): return web.Response(text="🟢 Enterprise Bot is running!")
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', web_handler)
@@ -277,6 +326,7 @@ async def start_web_server():
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
 
 async def main():
+    logger.info("جاري تشغيل البوت...")
     await start_web_server()
     await dp.start_polling(bot)
 
